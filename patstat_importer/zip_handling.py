@@ -15,7 +15,16 @@ def list_zip_files(directory):
         print(f"The directory {directory} does not exist.")
         return []
 
-    return [f for f in os.listdir(directory) if f.endswith('.zip') and f.startswith('data_PATSTAT')]
+    all_zips = [f for f in os.listdir(directory) if f.endswith('.zip')]
+    # Older PATSTAT distributions shipped each release inside a single
+    # ``data_PATSTAT_*.zip`` wrapper that in turn contained the per-table
+    # ``tls*.zip`` files. The newer BDDS portal hands out the per-table
+    # ``tls*.zip`` files directly. Prefer the wrapper if present; fall back
+    # to the flat ``tls*.zip`` layout.
+    wrapped = [f for f in all_zips if f.startswith('data_PATSTAT')]
+    if wrapped:
+        return wrapped
+    return [f for f in all_zips if f.lower().startswith('tls')]
 
 
 def list_files_in_zip(zip_filepath):

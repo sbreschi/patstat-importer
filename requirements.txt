@@ -1,3 +1,5 @@
-pandas
-numpy
-pyarrow
+polars
+
+# Required for download.py (EPO BDDS portal downloader)
+# After installing, also run: playwright install chromium
+playwright

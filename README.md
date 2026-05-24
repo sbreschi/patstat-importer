@@ -1,61 +1,141 @@
 # Patstat Importer
 
-A Python package designed for importing PATSTAT database tables and converting them to Parquet format. It facilitates easy manipulation and analysis of patent data.
+A Python package for importing PATSTAT Global database tables and converting them to Parquet files, ready for analysis. It can also download the PATSTAT zip files directly from the EPO BDDS portal.
+
+The package is built on top of [polars](https://pola.rs/) for fast, memory-efficient reading of the multi-gigabyte CSV exports.
 
 ## Installation
 
-Ensure you have Python installed on your machine. You can download it from python.org. This package is compatible with Python 3.7 and above.
+Ensure you have Python installed on your machine. You can download it from [python.org](https://www.python.org/). This package is compatible with Python 3.7 and above.
 
-You can install your package directly from GitHub using pip
+Install directly from GitHub with pip:
 
 ```bash
 pip install git+https://github.com/sbreschi/patstat-importer.git
 ```
 
-## Instructions
+If you also want to use the EPO portal downloader, install the optional `download` extra and then download the bundled Chromium that Playwright drives:
 
-1. Download all Patstat zip files from Patstat Global at the [EPO](https://publication-bdds.apps.epo.org/raw-data/products)
-2. Put all the zip files in a separate folder of your choice
-3. Important: download and put in the same folder also the index and documentation file (index_documentation_scripts_PATSTAT_Global)
+```bash
+pip install "patstat_importer[download] @ git+https://github.com/sbreschi/patstat-importer.git"
+playwright install chromium
+```
 
-Note: there is no need to unzip the files.
+After installation the package exposes two console scripts:
 
-## Usage
+* `patstat-download` — fetch the PATSTAT zip files from the EPO BDDS portal
+* `patstat-process` — convert the zip files to Parquet
+
+## Step 1 — Get the PATSTAT zip files
+
+You can either download the files manually or let the bundled downloader do it for you.
+
+### Option A — Manual download
+
+1. Download all PATSTAT zip files from PATSTAT Global at the [EPO BDDS portal](https://publication-bdds.apps.epo.org/raw-data/products).
+2. Put all the zip files in a folder of your choice.
+3. **Important:** download and put in the same folder the documentation file as well (e.g. `index_documentation_scripts_PATSTAT_Global*.zip` on older releases or `DOC_SQL.zip` on more recent ones). The documentation ZIP is needed to read the CREATE TABLE scripts and the expected row counts.
+
+There is no need to unzip anything.
+
+Both supported zip layouts work out of the box:
+* the older layout, where each release is wrapped in a single `data_PATSTAT_*.zip` containing the per-table `tls*.zip` files;
+* the newer BDDS layout, where each `tls*.zip` sits directly in the folder.
+
+### Option B — Automated download with `patstat-download`
+
+The `patstat-download` command logs into the EPO BDDS portal, navigates to the PATSTAT Global product page, and downloads every file of the chosen edition into a folder of your choice. It needs a valid EPO subscription.
+
+Set your EPO credentials as environment variables (the command never reads them from the command line):
+
+```cmd
+set EPO_USERNAME=your@email.com
+set EPO_PASSWORD=yourpassword
+```
+
+Then run the downloader. The `--edition` value must match the edition name as shown on the BDDS portal:
+
+```cmd
+patstat-download --edition "PATSTAT Global 2025 Autumn" ^
+                 --output-dir "D:/Download/Patstat/"
+```
+
+By default the browser runs headless. If something goes wrong (for instance the first time you log in, or after a portal UI change), pass `--visible` to watch the session:
+
+```cmd
+patstat-download --edition "PATSTAT Global 2025 Autumn" ^
+                 --output-dir "D:/Download/Patstat/" --visible
+```
+
+The downloader is resumable: zip files that are already present on disk and look valid are skipped. Truncated or broken files are removed and re-downloaded.
+
+## Step 2 — Convert the zip files to Parquet
+
+You can convert the zip files from Python or from the command line. In both cases the documentation ZIP and the inner subfolder containing the CREATE TABLE scripts are auto-detected, so you normally do not need to point at them explicitly.
+
+### From Python
 
 Use the `process_tables` function, specifying:
 
-1. the `input_folder`, i.e. the folder where you put the zip files downloaded from EPO-PATSTAT
-2. the `output_folder`, i.e. the folder where you want to save the parquet tables
-3. (optional) Indicate a list of tables to import (see examples, below). If you do not specify any table, by default it will read all tables
-4. (optional) Set `verbose=True` if you want to track the execution
-5. (optional) Specify the amount of RAM available (default 8Gb). Some of the tables are huge and are read/written in chunks.
+1. `input_folder` — the folder where you put the zip files downloaded from EPO-PATSTAT (data + documentation);
+2. `output_folder` — the folder where the Parquet tables will be written;
+3. (optional) `tables_to_process` — a list of tables to import (see examples below). If omitted, all tables are processed;
+4. (optional) `verbose=True` to print detailed progress;
+5. (optional) `total_ram_gb` — kept for API compatibility; no longer used (polars manages memory internally);
+6. (optional) `doc_zip` — filename of the documentation zip (e.g. `'DOC_SQL.zip'`). Auto-detected if omitted;
+7. (optional) `sql_subfolder` — inner subfolder of the documentation zip containing the CREATE TABLE scripts (e.g. `'CreateTableScripts'` or `'SQL/CreateTable'`). Auto-detected if omitted.
 
-### Examples
+#### Examples
 
-Read a single table. 
-
-```python
-from patstat_importer import process_tables
-process_tables(input_folder, output_folder, tables_to_process=['tls201'], verbose=True, total_ram_gb=32.0)
-```
-
-
-Read a list of tables. 
+Read a single table:
 
 ```python
 from patstat_importer import process_tables
-process_tables(input_folder, output_folder, tables_to_process=['tls201', 'tls202'], verbose=True, total_ram_gb=32.0)
+process_tables(input_folder, output_folder, tables_to_process=['tls201'], verbose=True)
 ```
 
-
-Read all tables (just omit the `tables_to_process` argument). 
+Read a list of tables:
 
 ```python
 from patstat_importer import process_tables
-process_tables(input_folder, output_folder, verbose=True, total_ram_gb=32.0)
+process_tables(input_folder, output_folder, tables_to_process=['tls201', 'tls202'], verbose=True)
 ```
 
-The table below provides the full list of table names to import and the name under which they are imported.
+Read all tables (omit `tables_to_process`):
+
+```python
+from patstat_importer import process_tables
+process_tables(input_folder, output_folder, verbose=True)
+```
+
+### From the command line
+
+The same functionality is exposed via `patstat-process`:
+
+```cmd
+patstat-process --data-folder "D:/Download/Patstat/" ^
+                --output-folder "D:/Patstat/parquet/" ^
+                --verbose
+```
+
+To process only a subset of tables, pass them with `--tables`:
+
+```cmd
+patstat-process --data-folder "D:/Download/Patstat/" ^
+                --output-folder "D:/Patstat/parquet/" ^
+                --tables tls201 tls206 ^
+                --verbose
+```
+
+Other flags:
+
+* `--doc-zip` — filename of the documentation zip (auto-detected if omitted);
+* `--sql-subfolder` — inner subfolder of the documentation zip containing the CREATE TABLE scripts (auto-detected if omitted);
+* `--ram` — informational only; kept for backward compatibility.
+
+### Table naming
+
+The table below provides the full list of input table names and the name under which they are saved.
 
 | Input      | Saved as ...                     |
 |------------|--------------------------------|
@@ -88,17 +168,41 @@ The table below provides the full list of table names to import and the name und
 | tls902     | tls902_ipc_nace2               |
 | tls904     | tls904_nuts                    |
 
+## Validation
 
-## Use parquet files
+Every Parquet file produced is validated against the documentation ZIP before the next table is processed:
 
-You can easily read and query parquet files, either with `pandas.read_parquet()` 
+* **Row count** — must match the value reported in PATSTAT's `RowCount` report.
+* **Schema** — the columns written to Parquet must match the columns read from the CSV.
+
+If either check fails, processing aborts with a `RuntimeError` and the offending Parquet file is kept on disk so you can inspect it.
+
+## Using the Parquet files
+
+You can query the Parquet files with the tool of your choice.
+
+With **polars** (the engine used by `patstat-importer` itself):
+
+```python
+import polars as pl
+df = pl.scan_parquet('./tls201_appln.parquet') \
+       .filter(pl.col('appln_auth') == 'EP') \
+       .select(['appln_id', 'appln_auth']) \
+       .collect()
+```
+
+With **pandas**:
 
 ```python
 import pandas as pd
-df = pd.read_parquet('./tls201_appln.parquet', columns=['appln_id', 'appln_auth'], filters=[('appln_auth', '==', 'EP')])
+df = pd.read_parquet(
+    './tls201_appln.parquet',
+    columns=['appln_id', 'appln_auth'],
+    filters=[('appln_auth', '==', 'EP')],
+)
 ```
 
-or with `pyarrow`:
+With **pyarrow**:
 
 ```python
 from pyarrow.parquet import ParquetFile
@@ -109,27 +213,27 @@ first_ten_rows = next(pf.iter_batches(batch_size=10))
 df = pa.Table.from_batches([first_ten_rows]).to_pandas()
 ```
 
-For Stata users, you can try using the code you find at this [site](https://github.com/mcaceresb/stata-parquet) (though I personally discourage using Stata with this data).
-
+For Stata users, you can try [stata-parquet](https://github.com/mcaceresb/stata-parquet) (though I personally discourage using Stata with this data).
 
 ## Handling of missing or unknown values
 
 The files coming from PATSTAT do not contain any NULL values. Depending on the data type / domain, PATSTAT represents missing values like this:
-* Missing values in attributes of type `date` are represented as '9999-12-31'.
-* Missing values in attributes of type `string` are represented as zero length strings (like "") or as fixed length strings containing spaces (like "  ").
+
+* Missing values in attributes of type `date` are represented as `9999-12-31`.
+* Missing values in attributes of type `string` are represented as zero-length strings (like `""`) or as fixed-length strings containing spaces (like `"  "`).
 * Missing values in numerical attributes are represented as number zero.
 
-When importing the data to parquet, I followed these rules:
-* Missing values in variables of type `date` are represented as `NaT` (i.e., Not a Time)
-* Missing values in variables of type `string` are represented as `None`
+When importing the data to Parquet, the following rules are applied:
+
+* Missing values in variables of type `date` are represented as `null` (polars) / `NaT` (pandas).
+* Missing values in variables of type `string` are represented as `null` / `None`.
 * Missing values in numerical variables are represented as number zero.
 * Missing values in variables denoting years are represented by the integer 9999.
 
 ## Testing
 
-The library has been tested on Patstat Global 2023 Autumn and 2024 Spring.
+The library has been tested on **PATSTAT Global 2025 Autumn**.
 
 ## Disclaimer
 
-The package has been successfully tested on the aforementioned PATSTAT versions; however, it may not function correctly with future (or past) releases. This is particularly true if the EPO makes significant changes to the structure and content of the "index_documentation_scripts_PATSTAT_Global" file. This file is crucial as it provides the names of tables, the variables included in each table, and their data types. I will strive to maintain the library to ensure compatibility with future versions of PATSTAT as much as possible.
-
+The package has been successfully tested on the aforementioned PATSTAT version; however, it may not function correctly with future (or past) releases. This is particularly true if the EPO makes significant changes to the structure and content of the documentation ZIP (`index_documentation_scripts_PATSTAT_Global*` or `DOC_SQL.zip`). That file is crucial as it provides the table names, the variables included in each table, their data types, and the expected row counts used for validation. I will strive to keep the library up to date with future PATSTAT releases.

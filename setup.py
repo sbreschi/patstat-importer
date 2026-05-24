@@ -12,10 +12,17 @@ setup(
     url='https://github.com/sbreschi/patstat-importer',
     license='MIT',
     install_requires=[
-        'pandas',
-        'pyarrow',
-        'numpy',
+        'polars',
     ],
+    extras_require={
+        'download': ['playwright'],
+    },
+    entry_points={
+        'console_scripts': [
+            'patstat-download=patstat_importer.download:main',
+            'patstat-process=patstat_importer.table_processor:main',
+        ],
+    },
     classifiers=[
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Developers',
