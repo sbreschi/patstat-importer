@@ -1,8 +1,9 @@
 import argparse
 import os
 import re
+import shutil
+import tempfile
 import zipfile
-from io import BytesIO
 from zipfile import ZipFile
 
 import polars as pl
@@ -14,6 +15,49 @@ from .get_dtypes import (
     convert_sql_to_polars_dtype,
     _find_doc_zip,
 )
+
+_COPY_CHUNK = 64 * 1024 * 1024  # 64 MiB
+
+
+def _stream_extract(zip_path, member, dest_path):
+    """Copy a ZIP member to dest_path in bounded-memory chunks."""
+    with ZipFile(zip_path) as z, z.open(member) as src, open(dest_path, 'wb') as dst:
+        shutil.copyfileobj(src, dst, length=_COPY_CHUNK)
+
+
+def _stream_extract_nested(outer_zip, inner_member, csv_member, dest_path, tmpdir):
+    """Stream-extract a CSV from an outer.zip → inner.zip → csv chain via temp file."""
+    inner_path = os.path.join(tmpdir, '_inner_' + os.path.basename(inner_member))
+    try:
+        _stream_extract(outer_zip, inner_member, inner_path)
+        _stream_extract(inner_path, csv_member, dest_path)
+    finally:
+        if os.path.exists(inner_path):
+            os.unlink(inner_path)
+
+
+def _build_cast_exprs(columns, polars_schema, date_cols):
+    """Build per-column cast expressions for a string-typed scan."""
+    cast_exprs = []
+    for col in columns:
+        dtype = polars_schema.get(col, pl.String)
+
+        if dtype == pl.String:
+            stripped = pl.col(col).str.strip_chars()
+            cast_exprs.append(
+                pl.when(stripped == '').then(None).otherwise(stripped).alias(col)
+            )
+        elif col in date_cols and dtype == pl.Date:
+            cast_exprs.append(
+                pl.col(col).str.to_date(format='%Y-%m-%d', strict=False).alias(col)
+            )
+        elif col in date_cols and dtype == pl.Datetime:
+            cast_exprs.append(
+                pl.col(col).str.to_datetime(format='%Y-%m-%d', strict=False).alias(col)
+            )
+        else:
+            cast_exprs.append(pl.col(col).cast(dtype, strict=False).alias(col))
+    return cast_exprs
 
 
 def patstat_tables(directory):
@@ -153,41 +197,46 @@ def process_tables(data_folder, output_folder, tables_to_process=None, verbose=F
         )
         output_filename = os.path.join(output_folder, f"{full_table_name}.parquet")
 
-        frames = []
-        csv_columns = None
+        with tempfile.TemporaryDirectory(
+            prefix=f'{focal_table}_', dir=output_folder
+        ) as tmpdir:
+            csv_paths = []
 
-        for input_data in relevant_tables:
-            zips = [x for x in list_files_in_zip(input_data) if focal_table in x]
-            with ZipFile(input_data) as z:
+            for input_data in relevant_tables:
+                zips = [x for x in list_files_in_zip(input_data) if focal_table in x]
                 for table in zips:
-                    with z.open(table) as z2:
-                        print(f'Processing {table}')
-                        if table.lower().endswith('.csv'):
-                            # New BDDS portal: tls*.zip contains the CSV directly.
-                            raw_bytes = z2.read()
-                        else:
-                            # Old layout: tls*.zip is itself nested inside a
-                            # data_PATSTAT*.zip wrapper, and contains an inner
-                            # CSV named after the zip.
-                            csv_name = table.replace('.zip', '.csv')
-                            with ZipFile(BytesIO(z2.read())) as nested_zip:
-                                with nested_zip.open(csv_name) as csvfile:
-                                    raw_bytes = csvfile.read()
+                    print(f'Processing {table}')
+                    base = os.path.basename(table)
+                    if table.lower().endswith('.csv'):
+                        # New BDDS portal: tls*.zip contains the CSV directly.
+                        dest = os.path.join(tmpdir, base)
+                        _stream_extract(input_data, table, dest)
+                    else:
+                        # Old layout: tls*.zip is itself nested inside a
+                        # data_PATSTAT*.zip wrapper, and contains an inner
+                        # CSV named after the zip.
+                        csv_name = table.replace('.zip', '.csv')
+                        dest = os.path.join(tmpdir, os.path.basename(csv_name))
+                        _stream_extract_nested(
+                            input_data, table, csv_name, dest, tmpdir
+                        )
+                    csv_paths.append(dest)
 
-                    frame = _read_csv_chunk(raw_bytes, polars_schema, date_cols)
+            if not csv_paths:
+                print(f'No data found for {focal_table}')
+                continue
 
-                    if csv_columns is None:
-                        csv_columns = frame.columns
-                    frames.append(frame)
-
-        if not frames:
-            print(f'No data found for {focal_table}')
-            continue
-
-        out_df = pl.concat(frames, rechunk=True)
-        out_df.write_parquet(output_filename, compression='zstd')
-        del out_df
-        frames.clear()
+            lazy = pl.scan_csv(
+                csv_paths,
+                infer_schema=False,
+                null_values=['', 'NULL'],
+                encoding='utf8',
+            )
+            csv_columns = lazy.collect_schema().names()
+            lazy = lazy.with_columns(
+                _build_cast_exprs(csv_columns, polars_schema, date_cols)
+            )
+            lazy.sink_parquet(output_filename, compression='zstd')
 
         # ── Row count validation (hard fail) ──────────────────────────────────
         actual_count = pl.scan_parquet(output_filename).select(pl.len()).collect().item()
@@ -250,36 +299,3 @@ def main():
         doc_zip=args.doc_zip,
         sql_subfolder=args.sql_subfolder,
     )
-
-
-def _read_csv_chunk(raw_bytes, polars_schema, date_cols):
-    """Read CSV bytes into a polars DataFrame with proper types and null handling."""
-    # Read everything as strings first to avoid parse errors on edge cases
-    frame = pl.read_csv(
-        raw_bytes,
-        infer_schema=False,
-        null_values=['', 'NULL'],
-        encoding='utf8',
-    )
-
-    cast_exprs = []
-    for col in frame.columns:
-        dtype = polars_schema.get(col, pl.String)
-
-        if dtype == pl.String:
-            stripped = pl.col(col).str.strip_chars()
-            cast_exprs.append(
-                pl.when(stripped == '').then(None).otherwise(stripped).alias(col)
-            )
-        elif col in date_cols and dtype == pl.Date:
-            cast_exprs.append(
-                pl.col(col).str.to_date(format='%Y-%m-%d', strict=False).alias(col)
-            )
-        elif col in date_cols and dtype == pl.Datetime:
-            cast_exprs.append(
-                pl.col(col).str.to_datetime(format='%Y-%m-%d', strict=False).alias(col)
-            )
-        else:
-            cast_exprs.append(pl.col(col).cast(dtype, strict=False).alias(col))
-
-    return frame.with_columns(cast_exprs)
