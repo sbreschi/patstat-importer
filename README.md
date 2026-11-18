@@ -6,7 +6,7 @@ The package is built on top of [polars](https://pola.rs/) for fast, memory-effic
 
 ## Installation
 
-Ensure you have Python installed on your machine. You can download it from [python.org](https://www.python.org/). This package is compatible with Python 3.7 and above.
+Ensure you have Python installed on your machine. You can download it from [python.org](https://www.python.org/). This package requires Python 3.10 or newer (the minimum supported by current polars releases).
 
 Install directly from GitHub with pip:
 
@@ -34,7 +34,7 @@ You can either download the files manually or let the bundled downloader do it f
 
 1. Download all PATSTAT zip files from PATSTAT Global at the [EPO BDDS portal](https://publication-bdds.apps.epo.org/raw-data/products).
 2. Put all the zip files in a folder of your choice.
-3. **Important:** download and put in the same folder the documentation file as well (e.g. `index_documentation_scripts_PATSTAT_Global*.zip` on older releases or `DOC_SQL.zip` on more recent ones). The documentation ZIP is needed to read the CREATE TABLE scripts and the expected row counts.
+3. **Important:** download and put in the same folder the documentation file as well (e.g. `index_documentation_scripts_PATSTAT_Global*.zip` on older releases or `DOC_SQL.zip` on more recent ones). The documentation ZIP is needed to read the CREATE TABLE scripts and the expected row counts. It is detected automatically as the only zip in the folder that is not a `data_PATSTAT*` bulk archive and contains `.sql` scripts; if more than one zip qualifies, name it explicitly with `doc_zip` / `--doc-zip`.
 
 There is no need to unzip anything.
 
@@ -79,13 +79,14 @@ You can convert the zip files from Python or from the command line. In both case
 
 Use the `process_tables` function, specifying:
 
-1. `input_folder` — the folder where you put the zip files downloaded from EPO-PATSTAT (data + documentation);
+1. `data_folder` — the folder where you put the zip files downloaded from EPO-PATSTAT (data + documentation);
 2. `output_folder` — the folder where the Parquet tables will be written;
 3. (optional) `tables_to_process` — a list of tables to import (see examples below). If omitted, all tables are processed;
 4. (optional) `verbose=True` to print detailed progress;
 5. (optional) `total_ram_gb` — kept for API compatibility; no longer used (polars manages memory internally);
 6. (optional) `doc_zip` — filename of the documentation zip (e.g. `'DOC_SQL.zip'`). Auto-detected if omitted;
-7. (optional) `sql_subfolder` — inner subfolder of the documentation zip containing the CREATE TABLE scripts (e.g. `'CreateTableScripts'` or `'SQL/CreateTable'`). Auto-detected if omitted.
+7. (optional) `sql_subfolder` — inner subfolder of the documentation zip containing the CREATE TABLE scripts (e.g. `'CreateTableScripts'` or `'SQL/CreateTable'`). Auto-detected if omitted;
+8. (optional) `tmp_dir` — folder where the CSV files are extracted before conversion (see *Disk space and time* below). Defaults to `output_folder`; point it at a fast local disk when the output goes to a network share.
 
 #### Examples
 
@@ -93,21 +94,21 @@ Read a single table:
 
 ```python
 from patstat_importer import process_tables
-process_tables(input_folder, output_folder, tables_to_process=['tls201'], verbose=True)
+process_tables(data_folder, output_folder, tables_to_process=['tls201'], verbose=True)
 ```
 
 Read a list of tables:
 
 ```python
 from patstat_importer import process_tables
-process_tables(input_folder, output_folder, tables_to_process=['tls201', 'tls202'], verbose=True)
+process_tables(data_folder, output_folder, tables_to_process=['tls201', 'tls202'], verbose=True)
 ```
 
 Read all tables (omit `tables_to_process`):
 
 ```python
 from patstat_importer import process_tables
-process_tables(input_folder, output_folder, verbose=True)
+process_tables(data_folder, output_folder, verbose=True)
 ```
 
 ### From the command line
@@ -133,7 +134,14 @@ Other flags:
 
 * `--doc-zip` — filename of the documentation zip (auto-detected if omitted);
 * `--sql-subfolder` — inner subfolder of the documentation zip containing the CREATE TABLE scripts (auto-detected if omitted);
+* `--tmp-dir` — folder for the temporary CSV extraction (default: the output folder); use a local disk when the output folder is on a network share (see below);
 * `--ram` — informational only; kept for backward compatibility.
+
+### Disk space and time
+
+Each table is converted in one pass: all of its CSV files are extracted from the zips into a temporary folder, read by polars and streamed into a single Parquet file, and the temporary folder is then deleted. The temporary folder therefore needs room for the largest table's uncompressed CSVs. In PATSTAT Global 2026 Autumn that is tls231 (143 GB), followed by tls203 (100 GB), so allow about 150 GB. The temporary folder defaults to the output folder; when the output goes to a network share, point `tmp_dir` / `--tmp-dir` at a local disk, which is faster and avoids failures on transient network errors.
+
+For reference, the 2026 Autumn release is 85 GB of zips and converts to 73 GB of Parquet. On a desktop PC extracting to a local SSD and writing the Parquet files to a NAS, the whole release took about an hour.
 
 ### Table naming
 
@@ -144,7 +152,7 @@ The table below provides the full list of input table names and the name under w
 | tls201     | tls201_appln                   |
 | tls202     | tls202_appln_title             |
 | tls203     | tls203_appln_abstr             |
-| tls204     | tls204_prior                   |
+| tls204     | tls204_appln_prior             |
 | tls205     | tls205_tech_rel                |
 | tls206     | tls206_person                  |
 | tls207     | tls207_pers_appln              |
@@ -227,14 +235,14 @@ The files coming from PATSTAT do not contain any NULL values. Depending on the d
 
 When importing the data to Parquet, the following rules are applied:
 
-* Missing values in variables of type `date` are represented as `null` (polars) / `NaT` (pandas).
-* Missing values in variables of type `string` are represented as `null` / `None`.
+* Dates are kept as PATSTAT delivers them: `9999-12-31` stays a real date value and is **not** converted to `null` (in 2026 Autumn, 6.4 million of the 146 million `appln_filing_date` values are `9999-12-31`). Only an empty field becomes `null` (polars) / `NaT` (pandas). Filter the sentinel out explicitly, e.g. `.filter(pl.col('appln_filing_date') != pl.date(9999, 12, 31))`.
+* Strings are stripped of surrounding spaces; an empty or all-space string becomes `null` / `None`.
 * Missing values in numerical variables are represented as number zero.
 * Missing values in variables denoting years are represented by the integer 9999.
 
 ## Testing
 
-The library has been tested on **PATSTAT Global 2025 Autumn**.
+The library has been tested on **PATSTAT Global 2025 Autumn** and **PATSTAT Global 2026 Autumn** (full 28-table imports, all row counts matching). The 2026 Autumn release changed the format of the RowCount report; the parser accepts it alongside the earlier formats.
 
 ## Disclaimer
 

@@ -142,7 +142,8 @@ def process_tables(data_folder, output_folder, tables_to_process=None, verbose=F
             'SQL/CreateTable'). Auto-detected if None.
         tmp_dir (str, optional): Directory where the CSV files are extracted
             before conversion. Needs room for the largest table's uncompressed
-            CSVs (~35 GB). Defaults to ``output_folder``; point it at a fast
+            CSVs (about 150 GB: tls231 of PATSTAT Global 2026 Autumn expands
+            to 143 GB). Defaults to ``output_folder``; point it at a fast
             local disk when ``output_folder`` is on a network share.
     """
     if tables_to_process is not None:
@@ -297,7 +298,7 @@ def main():
                         "CREATE TABLE scripts (e.g. 'CreateTableScripts' or "
                         "'SQL/CreateTable'). Auto-detected if not provided.")
     p.add_argument("--tmp-dir", default=None,
-                   help="Directory for the temporary CSV extraction (~35 GB for "
+                   help="Directory for the temporary CSV extraction (about 150 GB for "
                         "the largest table). Default: the output folder.")
     p.add_argument("--verbose", action="store_true", default=False)
     args = p.parse_args()
