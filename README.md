@@ -60,6 +60,8 @@ patstat-download --edition "PATSTAT Global 2025 Autumn" ^
                  --output-dir "D:/Download/Patstat/"
 ```
 
+Since late 2026 the EPO login asks for a second factor after the password: a one-time code sent to the e-mail address of the EPO account. The downloader detects this step, clicks "Send email" and then waits on the terminal for you to type the code (or to press Enter after clicking the verification link in the e-mail). Because of this, `patstat-download` has to be run from an interactive terminal; in a non-interactive shell it stops before requesting the e-mail and exits with an error.
+
 By default the browser runs headless. If something goes wrong (for instance the first time you log in, or after a portal UI change), pass `--visible` to watch the session:
 
 ```cmd

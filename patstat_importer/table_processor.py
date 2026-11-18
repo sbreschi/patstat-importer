@@ -71,7 +71,7 @@ def patstat_tables(directory):
 
 
 _ROW_COUNT_LINE = re.compile(
-    r'^\s*(tls\d+\w*)\s+count:\s+(\d+)\s*$', re.IGNORECASE
+    r'^\s*(tls\d+\w*)\s+count:?\s+(\d+)\s*$', re.IGNORECASE
 )
 
 
@@ -79,10 +79,12 @@ def table_names(directory, doc_zip=None):
     """Read the per-table expected row counts from the RowCount report file
     in the documentation ZIP.
 
-    Tolerant of two formats observed across PATSTAT releases:
+    Tolerant of three formats observed across PATSTAT releases:
         ``tls201_appln Count: 140525582``   (older)
-        ``tls201_appln count: 140525582``   (newer, lower-case, surrounded by
+        ``tls201_appln count: 140525582``   (2025, lower-case, surrounded by
         separator lines and ``(1 row affected)`` noise)
+        ``tls201_appln count\t146147007``    (2026b, tab-separated, no colon,
+        preceded by a ``table_name\trow_count`` header line)
     """
     if doc_zip is None:
         doc_zip = _find_doc_zip(directory)
@@ -123,7 +125,7 @@ def table_names(directory, doc_zip=None):
 
 
 def process_tables(data_folder, output_folder, tables_to_process=None, verbose=False,
-                   total_ram_gb=8.0, doc_zip=None, sql_subfolder=None):
+                   total_ram_gb=8.0, doc_zip=None, sql_subfolder=None, tmp_dir=None):
     """
     Process PATSTAT tables from ZIP archives and save them as Parquet files.
 
@@ -138,6 +140,10 @@ def process_tables(data_folder, output_folder, tables_to_process=None, verbose=F
         sql_subfolder (str, optional): Inner subfolder of the documentation zip
             containing the CREATE TABLE scripts (e.g. 'CreateTableScripts' or
             'SQL/CreateTable'). Auto-detected if None.
+        tmp_dir (str, optional): Directory where the CSV files are extracted
+            before conversion. Needs room for the largest table's uncompressed
+            CSVs (~35 GB). Defaults to ``output_folder``; point it at a fast
+            local disk when ``output_folder`` is on a network share.
     """
     if tables_to_process is not None:
         valid_tables = patstat_tables(data_folder)
@@ -147,6 +153,9 @@ def process_tables(data_folder, output_folder, tables_to_process=None, verbose=F
 
     print("Starting to process tables...\n")
     os.makedirs(output_folder, exist_ok=True)
+    if tmp_dir is None:
+        tmp_dir = output_folder
+    os.makedirs(tmp_dir, exist_ok=True)
 
     all_zip_files = list_zip_files(data_folder)
     if verbose:
@@ -198,7 +207,7 @@ def process_tables(data_folder, output_folder, tables_to_process=None, verbose=F
         output_filename = os.path.join(output_folder, f"{full_table_name}.parquet")
 
         with tempfile.TemporaryDirectory(
-            prefix=f'{focal_table}_', dir=output_folder
+            prefix=f'{focal_table}_', dir=tmp_dir
         ) as tmpdir:
             csv_paths = []
 
@@ -287,6 +296,9 @@ def main():
                    help="Inner subfolder of the documentation zip containing the "
                         "CREATE TABLE scripts (e.g. 'CreateTableScripts' or "
                         "'SQL/CreateTable'). Auto-detected if not provided.")
+    p.add_argument("--tmp-dir", default=None,
+                   help="Directory for the temporary CSV extraction (~35 GB for "
+                        "the largest table). Default: the output folder.")
     p.add_argument("--verbose", action="store_true", default=False)
     args = p.parse_args()
 
@@ -298,4 +310,5 @@ def main():
         total_ram_gb=args.ram,
         doc_zip=args.doc_zip,
         sql_subfolder=args.sql_subfolder,
+        tmp_dir=args.tmp_dir,
     )

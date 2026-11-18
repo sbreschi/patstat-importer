@@ -21,6 +21,8 @@ import os
 import sys
 import urllib.request
 import urllib.error
+import urllib.parse
+import zipfile
 from pathlib import Path
 
 PORTAL_URL = "https://publication-bdds.apps.epo.org/raw-data/products"
@@ -67,6 +69,22 @@ def _fmt_bytes(n):
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} TB"
+
+
+def _zip_is_complete(path):
+    """True if ``path`` is a readable zip archive with at least one entry.
+
+    Opening the archive reads its central directory, so a truncated
+    download (no end-of-central-directory record), a 0-byte placeholder or
+    an HTML error page saved under a .zip name all return False.
+    """
+    try:
+        if os.path.getsize(path) == 0:
+            return False
+        with zipfile.ZipFile(path) as z:
+            return len(z.namelist()) > 0
+    except (OSError, zipfile.BadZipFile):
+        return False
 
 
 def _dump_page(page, limit=2000):
@@ -226,6 +244,106 @@ def _click_signin_if_needed(page):
 
     print("  Exhausted sign-in steps without finding login form.")
     return page
+
+
+_OTP_SEND_SEL = (
+    'input[type="submit"][value*="Send email" i], button:has-text("Send email"), '
+    'input[type="submit"][value*="Send me an email" i], button:has-text("Send me an email"), '
+    'input[type="submit"][value*="Send code" i], button:has-text("Send code")'
+)
+_OTP_CODE_SEL = (
+    'input[name="credentials.passcode"], input[autocomplete="one-time-code"], '
+    'input[name*="passcode" i], input[name*="code" i]:not([type="hidden"]), '
+    'input[type="tel"], input[type="number"]'
+)
+# Okta hides the code field behind this link when it also offers a magic link.
+_OTP_ENTER_CODE_SEL = (
+    'a:text-matches("Enter a verification code", "i"), '
+    'button:text-matches("Enter a verification code", "i"), '
+    '[role="link"]:text-matches("Enter a verification code", "i")'
+)
+
+
+def _on_bdds(url):
+    """True when ``url`` is a BDDS portal page (not the OIDC callback hop).
+
+    Compares the parsed hostname: the Okta login URL carries the portal host
+    inside its ``redirect_uri`` query parameter, so a substring test on the
+    whole URL is a false positive.
+    """
+    try:
+        parts = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    return (parts.hostname == "publication-bdds.apps.epo.org"
+            and "/oidc/" not in parts.path)
+
+
+def _handle_email_otp(page, wait_s=15):
+    """Handle the e-mail verification step the EPO identity provider (Okta)
+    shows after the password since late 2026.
+
+    Polls for up to ``wait_s`` seconds: if the browser is already back on the
+    BDDS portal there is no second factor and we return True; if a 'Send
+    email' button shows up, the one-time code must be typed in by the user,
+    so we click it, wait for the code field, prompt on the terminal, fill
+    and submit. Returns False when a code is required but stdin is not an
+    interactive terminal (nothing is clicked in that case, so no e-mail is
+    sent), or when the code field never appears.
+    """
+    send_btn = None
+    for _ in range(wait_s * 2):
+        if _on_bdds(page.url):
+            return True
+        try:
+            loc = page.locator(_OTP_SEND_SEL).first
+            if loc.count() > 0 and loc.is_visible():
+                send_btn = loc
+                break
+        except Exception:
+            pass
+        page.wait_for_timeout(500)
+    if send_btn is None:
+        return True
+
+    print("The EPO login requires a one-time verification code sent by e-mail.")
+    if not sys.stdin.isatty():
+        print("  No interactive terminal to type the code into; aborting before "
+              "requesting it. Run patstat-download from a terminal window.")
+        return False
+
+    send_btn.click()
+    # Two ways to finish: click the link in the e-mail (this page then polls
+    # and continues by itself) or type the code after "Enter a verification
+    # code instead".
+    try:
+        page.wait_for_selector(
+            _OTP_CODE_SEL + ', ' + _OTP_ENTER_CODE_SEL,
+            state="visible", timeout=20_000,
+        )
+    except Exception:
+        print("  Clicked 'Send email' but neither a code field nor an "
+              "'Enter a verification code' link appeared.")
+        _dump_page(page)
+        return False
+
+    code = input(
+        "  Type the verification code from the e-mail and press Enter\n"
+        "  (or click the link in the e-mail and then just press Enter): "
+    ).strip()
+    if not code:
+        return True
+    try:
+        if not page.locator(_OTP_CODE_SEL).first.is_visible():
+            page.locator(_OTP_ENTER_CODE_SEL).first.click()
+            page.wait_for_selector(_OTP_CODE_SEL, state="visible", timeout=10_000)
+        page.locator(_OTP_CODE_SEL).first.fill(code)
+        page.locator('input[type="submit"], button[type="submit"]').first.click()
+    except Exception as exc:
+        print(f"  Could not enter the verification code: {exc}")
+        _dump_page(page)
+        return False
+    return True
 
 
 _POPUP_CONFIRM_SELECTORS = (
@@ -423,6 +541,11 @@ def collect_and_download(edition, username, password, output_dir, headless=True)
             ' button[type="submit"], input[type="submit"]'
         ).first.click()
 
+        # Second factor: a one-time code e-mailed to the account address.
+        if not _handle_email_otp(page):
+            browser.close()
+            sys.exit(1)
+
         # Wait for the FULL OIDC redirect chain to complete:
         #   login.epo.org/... → bdds.../raw-data/oidc/callback?code=... → bdds.../raw-data/products
         # `networkidle` can fire mid-chain (at the callback hop), so we wait for
@@ -458,7 +581,10 @@ def collect_and_download(edition, username, password, output_dir, headless=True)
                 )
             except Exception:
                 pass
-        print(f"  Authenticated. URL: {page.url}")
+        if "publication-bdds.apps.epo.org" in page.url:
+            print(f"  Back on BDDS. URL: {page.url}")
+        else:
+            print(f"  Warning: still not back on BDDS after login. URL: {page.url}")
 
         # Only navigate to the products page if we're already on the BDDS
         # domain (session established) AND not already there. This guard
@@ -472,8 +598,11 @@ def collect_and_download(edition, username, password, output_dir, headless=True)
         # nav) and a "Subscriptions" heading only when authenticated. If we
         # see neither within 15s, dump the page and exit with a clear message
         # instead of silently proceeding into a confused products-page search.
+        # Whole-text matches only: a plain `text=Subscriptions` also matched
+        # the sentence "...users WITH active subscriptions" on the anonymous
+        # landing page and produced a false positive.
         signed_in = False
-        for sel in ('text=Sign out', 'text=Subscriptions'):
+        for sel in (r'text=/^\s*Sign out\s*$/i', r'text=/^\s*Subscriptions\s*$/i'):
             try:
                 page.wait_for_selector(sel, timeout=15_000)
                 signed_in = True
@@ -613,19 +742,11 @@ def collect_and_download(edition, username, password, output_dir, headless=True)
                 '[data-testid="download-item-button"], button:has-text("Download item")'
             ).first
 
-            # Skip if a valid-looking zip is already on disk. We require the
-            # zip "PK" signature and a minimum size — this lets the script
-            # discard the 57 KB HTML "error" files that the old urllib path
-            # may have left behind.
+            # Skip if a complete zip is already on disk. Small but valid
+            # archives (tls801..tls904 are a few KB) are kept; truncated or
+            # 0-byte files and HTML error pages are removed and re-fetched.
             if dest.exists():
-                ok = False
-                try:
-                    if dest.stat().st_size > 1_000_000:
-                        with open(dest, "rb") as fh:
-                            if fh.read(2) == b"PK":
-                                ok = True
-                except Exception:
-                    pass
+                ok = _zip_is_complete(dest)
                 if ok:
                     print(f"[{i+1}/{n_rows}] Already complete: {filename}\n")
                     continue
